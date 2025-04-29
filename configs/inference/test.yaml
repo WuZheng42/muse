@@ -1,0 +1,10 @@
+task_0:
+ video_path: "D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4"
+ audio_path: "C:\\Users\\Administrator\\Desktop\\test-cn3.wav"
+#
+#task_1:
+# video_path: "D:\\PythonProject\\MimicTalkForWin\\data\\zcm_train\\zcm_train.mp4"
+# audio_path: "C:\\Users\\Administrator\\Desktop\\test-cn2.wav"
+# bbox_shift: -7
+  
+
