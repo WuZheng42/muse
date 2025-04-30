@@ -16,3 +16,4 @@ debug
 exp_out
 .gradio
 /models/
+/data/temp/
