@@ -1,5 +1,5 @@
 diffusers==0.30.2
-accelerate==0.28.0
+
 numpy==1.23.5
 tensorflow==2.12.0
 tensorboard==2.12.0
@@ -18,3 +18,7 @@ imageio[ffmpeg]
 omegaconf
 ffmpeg-python
 moviepy
+
+
+accelerate==0.33.0
+peft==0.11.0
