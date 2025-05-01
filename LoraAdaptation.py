@@ -60,7 +60,7 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
     )
 
     wav2vec_model = WhisperModel.from_pretrained(whisper_path).to(
-        device="cuda", dtype=torch.float32).eval()
+        device=device, dtype=torch.float32).eval()
     wav2vec_model.requires_grad_(False)
 
     pe.eval()
@@ -132,6 +132,11 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
         for pixel_values, ref_pixel_values, audio_feature, audio_offset, audio_step in pbar:
             with torch.no_grad():
                 bsz, num_frames, c, h, w = pixel_values.shape
+
+                pixel_values = pixel_values.to(device)
+                ref_pixel_values = ref_pixel_values.to(device)
+                audio_feature = audio_feature.to(device)
+
 
                 # Process audio features
                 audio_prompts = process_audio_features(2, 2, audio_feature,

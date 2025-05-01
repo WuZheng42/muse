@@ -14,8 +14,7 @@ from transformers import AutoFeatureExtractor
 from PIL import Image
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs, coord_placeholder
 
-BATCH = 10
-NUM_FRAMES = 10
+BATCH = 2
 extra_margin_1_5 = 10
 
 
