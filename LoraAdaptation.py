@@ -44,7 +44,7 @@ def process_audio_features(audio_padding_length_left, audio_padding_length_right
 
 def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper_path,
                Epoch=100, adam_beta1=0.5, adam_beta2=0.999
-               , adam_epsilon=1.0e-8, adam_weight_decay=1.0e-2, g_num_frames=25,
+               , adam_epsilon=1.0e-8, adam_weight_decay=1.0e-2, g_num_frames=15,
                learning_rate=2.0e-5, l1_loss_weight=1.0, vgg_loss_weight=0.01,
                vgg_layer_weight=None, pyramid_scale=None, device='cuda:0'):
     if vgg_layer_weight is None:
@@ -191,7 +191,7 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
                 audio_prompts_backward,
             )
 
-            latents_pred = (1 / vae_model.config.scaling_factor) * latents_pred
+            latents_pred = (1 / vae_model.config.scaling_factor) * latents_pred.sample
             image_pred = vae_model.decode(latents_pred).sample
 
             # Calculate L1 loss
