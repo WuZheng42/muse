@@ -155,7 +155,7 @@ class CustomDataset(Dataset):
         ])
 
     def __len__(self):
-        return len(self.video_paths)
+        return 2500
 
     def __getitem__(self, idx):
         attempts = 0
@@ -177,15 +177,8 @@ class CustomDataset(Dataset):
                 print(f"video {self.project_dir} has less than {self.num_frames * 10} frames")
                 continue
 
-            for drive_idx in drive_idx_list:
-                src_idx = get_src_idx(
-                    drive_idx, T, self.sample_method, shift_landmarks, face_shapes, self.top_k_ratio)
-                if src_idx is None:
-                    list_index_out_of_range = True
-                    break
-                src_idx = min(src_idx, e - 1)
-                src_idx = max(src_idx, s)
-                src_idx_list.append(src_idx)
+            src_idx_list = drive_idx_list[:]  # 创建原列表的一个切片副本
+            random.shuffle(src_idx_list)  # 打乱副本的顺序
 
             # Get reference images
             ref_face_valid_flag = True
@@ -233,9 +226,10 @@ class CustomDataset(Dataset):
         raise ValueError("Unable to find a valid sample after maximum attempts.")
 
 
-def GetDataLoader(file='Data\\TrainSeged.txt', num_limit=-1):
+def GetDataLoader(project_dor, num_frames):
+    dataset = CustomDataset(project_dor, num_frames)
     dataloader = torch.utils.data.DataLoader(
-        dataset=None,
+        dataset=dataset,
         batch_size=BATCH,
         shuffle=True,
         num_workers=1,
@@ -243,4 +237,4 @@ def GetDataLoader(file='Data\\TrainSeged.txt', num_limit=-1):
     return dataloader
 
 
-ProcessVideoV1_5('D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4')
+# ProcessVideoV1_5('D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4')

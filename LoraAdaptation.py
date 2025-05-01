@@ -42,10 +42,15 @@ def process_audio_features(audio_padding_length_left, audio_padding_length_right
     return audio_prompts
 
 
-def Adaptation(unet_model_path, vae_type, unet_config, whisper_path, Epoch, adam_beta1, adam_beta2, adam_epsilon,
-               adam_weight_decay,
+def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper_path,
+               Epoch=100, adam_beta1=0.5, adam_beta2=0.999
+               , adam_epsilon=1.0e-8, adam_weight_decay=1.0e-2, g_num_frames=25,
                learning_rate=2.0e-5, l1_loss_weight=1.0, vgg_loss_weight=0.01,
-               vgg_layer_weight=[1, 1, 1, 1, 1], pyramid_scale=[1, 0.5, 0.25, 0.125], device='cuda:0'):
+               vgg_layer_weight=None, pyramid_scale=None, device='cuda:0'):
+    if vgg_layer_weight is None:
+        vgg_layer_weight = [1, 1, 1, 1, 1]
+    if pyramid_scale is None:
+        pyramid_scale = [1, 0.5, 0.25, 0.125]
     # Load model weights
     vae, unet, pe = load_all_model(
         unet_model_path=unet_model_path,
@@ -78,7 +83,7 @@ def Adaptation(unet_model_path, vae_type, unet_config, whisper_path, Epoch, adam
     # 将 LoRA 应用到模型中
     lora_unet = get_peft_model(unet, lora_config)
 
-    train_dataloader = LoraDataUtils.GetDataLoader()
+    train_dataloader = LoraDataUtils.GetDataLoader(data_project_dir, g_num_frames)
 
     # 损失函数
     if vgg_loss_weight > 0:
@@ -210,5 +215,5 @@ def Adaptation(unet_model_path, vae_type, unet_config, whisper_path, Epoch, adam
             lr_scheduler.step()
 
 
-Adaptation(unet_config="./models/musetalkV15/musetalk.json",
+Adaptation(data_project_dir='./data/temp/LeiJun',unet_config="./models/musetalkV15/musetalk.json",
            unet_model_path="./models/musetalkV15/unet.pth", vae_type='sd-vae', whisper_path="./models/whisper")
