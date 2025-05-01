@@ -236,5 +236,6 @@ def GetDataLoader(project_dor, num_frames):
     )
     return dataloader
 
-
+if __name__ == '__main__':
+    pass
 # ProcessVideoV1_5('D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4')

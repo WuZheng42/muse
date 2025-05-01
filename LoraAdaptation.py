@@ -81,7 +81,7 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
     )
 
     # 将 LoRA 应用到模型中
-    lora_unet = get_peft_model(unet, lora_config)
+    lora_unet = get_peft_model(unet_model, lora_config)
 
     train_dataloader = LoraDataUtils.GetDataLoader(data_project_dir, g_num_frames)
 
@@ -91,16 +91,17 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
         pyramid = vgg_face.ImagePyramide(
             pyramid_scale, 3).to(device)
         vgg_IN.eval()
+        vgg_IN.requires_grad_(False)
         downsampler = Interpolate(
             size=(224, 224), mode='bilinear', align_corners=False).to(device)
     l1_losser = nn.L1Loss(reduction='mean')
 
     # 准备优化器
     trainable_params = list(filter(lambda p: p.requires_grad, lora_unet.parameters()))
-    print('trainable params')
-    for n, p in lora_unet.named_parameters():
-        if p.requires_grad:
-            print(n)
+    # print('trainable params')
+    # for n, p in lora_unet.named_parameters():
+    #     if p.requires_grad:
+    #         print(n)
 
     optimizer_cls = torch.optim.AdamW  # optimizer_cls = bnb.optim.AdamW8bit
 
@@ -214,6 +215,9 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
             optimizer.step()  # 更新权重
             lr_scheduler.step()
 
+    # lora_unet.save_pretrained("./models/lora/")
 
-Adaptation(data_project_dir='./data/temp/LeiJun',unet_config="./models/musetalkV15/musetalk.json",
-           unet_model_path="./models/musetalkV15/unet.pth", vae_type='sd-vae', whisper_path="./models/whisper")
+
+if __name__ == '__main__':
+    Adaptation(data_project_dir='./data/temp/LeiJun', unet_config="./models/musetalkV15/musetalk.json",
+               unet_model_path="./models/musetalkV15/unet.pth", vae_type='sd-vae', whisper_path="./models/whisper")
