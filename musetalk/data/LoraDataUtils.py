@@ -60,15 +60,6 @@ def crop_resize_img(self, img, bbox, crop_type='crop_resize', extra_margin=None)
 
 
 def get_audio_file(wav_path, start_index, feature_extractor):
-    """Get audio file features
-
-    Args:
-        wav_path: Audio file path
-        start_index: Starting index
-
-    Returns:
-        tuple: (Audio features, start index)
-    """
     if not os.path.exists(wav_path):
         return None
     audio_input_librosa, sampling_rate = librosa.load(wav_path, sr=16000)
@@ -214,14 +205,14 @@ class CustomDataset(Dataset):
             audio_step = step
             fps = 25.0 / step
 
-            save_audio_path = os.path.join(save_dir_head_frame, "wav.wav")
+            save_audio_path = os.path.join(self.project_dir, "wav.wav")
             audio_feature, audio_offset = get_audio_file(save_audio_path, audio_offset, self.feature_extractor)
 
             pixel_values = torch.stack(
                 [self.to_tensor(imSameID) for imSameID in imSameIDs], dim=0)
             ref_pixel_values = torch.stack(
                 [self.to_tensor(ref_img) for ref_img in ref_imgs], dim=0)
-            return pixel_values, ref_pixel_values, audio_feature, audio_offset, audio_step
+            return pixel_values, ref_pixel_values, audio_feature[0], audio_offset, audio_step
 
         raise ValueError("Unable to find a valid sample after maximum attempts.")
 
@@ -236,6 +227,10 @@ def GetDataLoader(project_dor, num_frames):
     )
     return dataloader
 
+
 if __name__ == '__main__':
     pass
+    # feature_extractor = AutoFeatureExtractor.from_pretrained("./models/whisper")
+    # audio_feature, audio_offset = get_audio_file('./data/temp/LeiJun/wav.wav', 230, feature_extractor)
+    # print(audio_feature)
 # ProcessVideoV1_5('D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4')

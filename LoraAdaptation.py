@@ -218,6 +218,7 @@ def Adaptation(data_project_dir, unet_model_path, vae_type, unet_config, whisper
     # lora_unet.save_pretrained("./models/lora/")
 
 
+
 if __name__ == '__main__':
     Adaptation(data_project_dir='./data/temp/LeiJun', unet_config="./models/musetalkV15/musetalk.json",
                unet_model_path="./models/musetalkV15/unet.pth", vae_type='sd-vae', whisper_path="./models/whisper")
