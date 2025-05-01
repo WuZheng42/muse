@@ -1,15 +1,18 @@
 import glob
 import os
 import pickle
+import random
+import torchvision.transforms as transforms
+import librosa
 import numpy as np
 from transformers import WhisperModel
 import cv2
 import torch
 from torch.utils.data import Dataset
 from musetalk.utils.audio_processor import AudioProcessor
+from transformers import AutoFeatureExtractor
 from PIL import Image
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs, coord_placeholder
-
 
 BATCH = 10
 NUM_FRAMES = 10
@@ -56,7 +59,45 @@ def crop_resize_img(self, img, bbox, crop_type='crop_resize', extra_margin=None)
     return img, extra_margin, mask_scaled_factor
 
 
+def get_audio_file(wav_path, start_index, feature_extractor):
+    """Get audio file features
+
+    Args:
+        wav_path: Audio file path
+        start_index: Starting index
+
+    Returns:
+        tuple: (Audio features, start index)
+    """
+    if not os.path.exists(wav_path):
+        return None
+    audio_input_librosa, sampling_rate = librosa.load(wav_path, sr=16000)
+    assert sampling_rate == 16000
+
+    while start_index >= 25 * 30:
+        audio_input = audio_input_librosa[16000 * 30:]
+        start_index -= 25 * 30
+    if start_index + 2 * 25 >= 25 * 30:
+        start_index -= 4 * 25
+        audio_input = audio_input_librosa[16000 * 4:16000 * 34]
+    else:
+        audio_input = audio_input_librosa[:16000 * 30]
+
+    assert 2 * (start_index) >= 0
+    assert 2 * (start_index + 2 * 25) <= 1500
+
+    audio_input = feature_extractor(
+        audio_input,
+        return_tensors="pt",
+        sampling_rate=sampling_rate
+    ).input_features
+    return audio_input, start_index
+
+
 def ProcessVideoV1_5(path):
+    fps = get_video_fps(path)
+    assert fps == 25.0
+
     # Set output paths
     input_basename = os.path.basename(path).split('.')[0]
 
@@ -66,13 +107,15 @@ def ProcessVideoV1_5(path):
 
     save_dir_org_frame = os.path.join(temp_dir, input_basename, 'org')
     save_dir_head_frame = os.path.join(temp_dir, input_basename, 'head1_5')
+    save_audio_path = os.path.join(temp_dir, input_basename, "wav.wav")
     crop_coord_save_path = os.path.join(temp_dir, input_basename, input_basename + ".pkl")
     os.makedirs(save_dir_org_frame, exist_ok=True)
     os.makedirs(save_dir_head_frame, exist_ok=True)
     cmd = f"ffmpeg -v fatal -i {path} -start_number 0 {save_dir_org_frame}/%08d.png"
     os.system(cmd)
+    cmd = f"ffmpeg -v fatal -i {path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {save_audio_path}"
+    os.system(cmd)
     input_img_list = sorted(glob.glob(os.path.join(save_dir_org_frame, '*.[jpJP][pnPN]*[gG]')))
-    fps = get_video_fps(path)
 
     coord_list, frame_list = get_landmark_and_bbox(input_img_list, 0)
     with open(crop_coord_save_path, 'wb') as f:
@@ -95,35 +138,99 @@ def ProcessVideoV1_5(path):
         cv2.imwrite(output_path, crop_frame)
         head_img_index += 1
 
-    # audio_processor = AudioProcessor(feature_extractor_path='./models/whisper')
-    # # Extract audio features
-    # weight_dtype = torch.float32
-    # whisper = WhisperModel.from_pretrained('./models/whisper')
-    # whisper = whisper.to(device='cuda:0', dtype=weight_dtype).eval()
-    # whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path)
-    # whisper_chunks = audio_processor.get_whisper_chunk(
-    #     whisper_input_features,
-    #     'cuda:0',
-    #     weight_dtype,
-    #     whisper,
-    #     librosa_length,
-    #     fps=fps,
-    #     audio_padding_length_left=2,
-    #     audio_padding_length_right=2,
-    # )
-
 
 # （bsz, num_frames, c, h, w）batch个（num_frames, c, h, w）的sample，一个视频可以提取一小个一小个的clip，其中包含num_frames
 class CustomDataset(Dataset):
-    def __init__(self, video_paths, num_frames):
-        self.video_paths = video_paths
+    def __init__(self, project_dir, num_frames):
+        self.project_dir = project_dir
         self.num_frames = num_frames
+        self.contorl_face_min_size = True
+        self.min_face_size = 150
+        self.max_attempts = 200
+        # Feature extractor
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained("./models/whisper")
+        self.to_tensor = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
 
     def __len__(self):
         return len(self.video_paths)
 
     def __getitem__(self, idx):
-        video_paths = self.video_paths[idx]
+        attempts = 0
+        while attempts < self.max_attempts:
+            save_dir_head_frame = os.path.join(self.project_dir, 'head1_5')
+            input_head_img_list = sorted(glob.glob(os.path.join(save_dir_head_frame, '*.[jpJP][pnPN]*[gG]')))
+
+            step = 1
+            s = 0
+            e = len(input_head_img_list)
+            drive_idx_start = random.randint(s, e - self.num_frames * step)
+            drive_idx_list = list(
+                range(drive_idx_start, drive_idx_start + self.num_frames * step, step))
+            assert len(drive_idx_list) == self.num_frames
+            len_valid_clip = e - s
+
+            if len_valid_clip < self.num_frames * 10:
+                attempts += 1
+                print(f"video {self.project_dir} has less than {self.num_frames * 10} frames")
+                continue
+
+            for drive_idx in drive_idx_list:
+                src_idx = get_src_idx(
+                    drive_idx, T, self.sample_method, shift_landmarks, face_shapes, self.top_k_ratio)
+                if src_idx is None:
+                    list_index_out_of_range = True
+                    break
+                src_idx = min(src_idx, e - 1)
+                src_idx = max(src_idx, s)
+                src_idx_list.append(src_idx)
+
+            # Get reference images
+            ref_face_valid_flag = True
+            ref_imgs = []
+            for src_idx in src_idx_list:
+                imSrc = Image.open(input_head_img_list[src_idx]).convert("RGB")
+                if self.contorl_face_min_size and min(imSrc.size[0], imSrc.size[1]) < self.min_face_size:
+                    ref_face_valid_flag = False
+                    break
+                ref_imgs.append(imSrc)
+
+            if not ref_face_valid_flag:
+                attempts += 1
+                print(
+                    f"video {self.project_dir} has reference face size smaller than minimum required {self.min_face_size}")
+                continue
+            imSameIDs = []
+            target_face_valid_flag = True
+            for drive_idx in drive_idx_list:
+                imSameID = Image.open(input_head_img_list[drive_idx]).convert("RGB")
+                if self.contorl_face_min_size and min(imSameID.size[0], imSameID.size[1]) < self.min_face_size:
+                    target_face_valid_flag = False
+                    break
+                imSameIDs.append(imSameID)
+            if not target_face_valid_flag:
+                attempts += 1
+                print(
+                    f"video {self.project_dir} has target face size smaller than minimum required {self.min_face_size}")
+                continue
+
+            # Process audio features
+            audio_offset = drive_idx_list[0]
+            audio_step = step
+            fps = 25.0 / step
+
+            save_audio_path = os.path.join(save_dir_head_frame, "wav.wav")
+            audio_feature, audio_offset = get_audio_file(save_audio_path, audio_offset, self.feature_extractor)
+
+            pixel_values = torch.stack(
+                [self.to_tensor(imSameID) for imSameID in imSameIDs], dim=0)
+            ref_pixel_values = torch.stack(
+                [self.to_tensor(ref_img) for ref_img in ref_imgs], dim=0)
+            return pixel_values, ref_pixel_values, audio_feature, audio_offset, audio_step
+
+        raise ValueError("Unable to find a valid sample after maximum attempts.")
 
 
 def GetDataLoader(file='Data\\TrainSeged.txt', num_limit=-1):
@@ -134,5 +241,6 @@ def GetDataLoader(file='Data\\TrainSeged.txt', num_limit=-1):
         num_workers=1,
     )
     return dataloader
+
 
 ProcessVideoV1_5('D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4')

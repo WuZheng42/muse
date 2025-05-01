@@ -8,9 +8,42 @@ import torch.nn as nn
 from musetalk.loss.basic_loss import Interpolate
 import musetalk.loss.vgg_face as vgg_face
 from diffusers.optimization import get_scheduler
+from transformers import WhisperModel
 
 
-def Adaptation(unet_model_path, vae_type, unet_config, Epoch, adam_beta1, adam_beta2, adam_epsilon, adam_weight_decay,
+def process_audio_features(audio_padding_length_left, audio_padding_length_right, audio_feature, audio_offset,
+                           audio_step, wav2vec, bsz, num_frames, weight_dtype):
+    with torch.no_grad():
+        audio_feature_length_per_frame = 2 * \
+                                         (audio_padding_length_left +
+                                          audio_padding_length_right + 1)
+        audio_feats = audio_feature.to(weight_dtype)
+        audio_feats = wav2vec.encoder(
+            audio_feats, output_hidden_states=True).hidden_states
+        audio_feats = torch.stack(audio_feats, dim=2).to(weight_dtype)  # [B, T, 10, 5, 384]
+
+        start_ts = audio_offset
+        step_ts = audio_step
+        audio_feats = torch.cat([torch.zeros_like(audio_feats[:, :2 * audio_padding_length_left]),
+                                 audio_feats,
+                                 torch.zeros_like(audio_feats[:, :2 * audio_padding_length_right])], 1)
+        audio_prompts = []
+        for bb in range(bsz):
+            audio_feats_list = []
+            for f in range(num_frames):
+                cur_t = (start_ts[bb] + f * step_ts[bb]) * 2
+                audio_clip = audio_feats[bb:bb + 1,
+                             cur_t: cur_t + audio_feature_length_per_frame]
+
+                audio_feats_list.append(audio_clip)
+            audio_feats_list = torch.stack(audio_feats_list, 1)
+            audio_prompts.append(audio_feats_list)
+        audio_prompts = torch.cat(audio_prompts)  # B, T, 10, 5, 384
+    return audio_prompts
+
+
+def Adaptation(unet_model_path, vae_type, unet_config, whisper_path, Epoch, adam_beta1, adam_beta2, adam_epsilon,
+               adam_weight_decay,
                learning_rate=2.0e-5, l1_loss_weight=1.0, vgg_loss_weight=0.01,
                vgg_layer_weight=[1, 1, 1, 1, 1], pyramid_scale=[1, 0.5, 0.25, 0.125], device='cuda:0'):
     # Load model weights
@@ -20,6 +53,11 @@ def Adaptation(unet_model_path, vae_type, unet_config, Epoch, adam_beta1, adam_b
         unet_config=unet_config,
         device=device
     )
+
+    wav2vec_model = WhisperModel.from_pretrained(whisper_path).to(
+        device="cuda", dtype=torch.float32).eval()
+    wav2vec_model.requires_grad_(False)
+
     pe.eval()
     vae_model = vae.vae
     vae_model.eval()
@@ -85,9 +123,14 @@ def Adaptation(unet_model_path, vae_type, unet_config, Epoch, adam_beta1, adam_b
         vgg_loss_accum = 0.
         # pixel_values-ref_pixel_values是视频（bsz, num_frames, c, h, w）
         # audio_prompts是process_audio_features(cfg, batch, model_dict['wav2vec'], bsz, num_frames, weight_dtype)来的
-        for pixel_values, ref_pixel_values, audio_prompts in pbar:
+        for pixel_values, ref_pixel_values, audio_feature, audio_offset, audio_step in pbar:
             with torch.no_grad():
                 bsz, num_frames, c, h, w = pixel_values.shape
+
+                # Process audio features
+                audio_prompts = process_audio_features(2, 2, audio_feature,
+                                                       audio_offset, audio_step,
+                                                       wav2vec_model, bsz, num_frames, torch.float32)
 
                 # Extract frames for backward pass
                 frames_left_index = 0
@@ -168,4 +211,4 @@ def Adaptation(unet_model_path, vae_type, unet_config, Epoch, adam_beta1, adam_b
 
 
 Adaptation(unet_config="./models/musetalkV15/musetalk.json",
-           unet_model_path="./models/musetalkV15/unet.pth", vae_type='sd-vae')
+           unet_model_path="./models/musetalkV15/unet.pth", vae_type='sd-vae', whisper_path="./models/whisper")
