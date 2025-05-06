@@ -45,6 +45,56 @@ class Net(nn.Module):
 
 logger = logging.getLogger(__name__)
 
+import os
+import json
+import logging
+import torch
+import torch.nn as nn
+# 确保导入了必要的 Diffusers 和 Transformers 组件
+from diffusers import AutoencoderKL, UNet2DConditionModel
+from transformers import WhisperModel
+from diffusers.optimization import get_scheduler
+from omegaconf import OmegaConf
+from einops import rearrange
+
+# 导入您项目中的其他模块
+from musetalk.models.syncnet import SyncNet
+from musetalk.loss.discriminator import MultiScaleDiscriminator, DiscriminatorFullModel
+from musetalk.loss.basic_loss import Interpolate
+import musetalk.loss.vgg_face as vgg_face
+from musetalk.data.dataset import PortraitDataset # 确保这个导入在函数外部或全局
+from musetalk.utils.utils import (
+    get_image_pred,
+    process_audio_features,
+    process_and_save_images
+    # save_models # 这个函数在 utils.py 中，也需要修改以保存 LoRA 权重
+)
+
+# 导入您自定义的 Net 包装器（假设它在同一个文件或已导入）
+class Net(nn.Module):
+    def __init__(
+        self,
+        unet: UNet2DConditionModel,
+    ):
+        super().__init__()
+        self.unet = unet
+
+    def forward(
+        self,
+        input_latents,
+        timesteps,
+        audio_prompts,
+    ):
+        model_pred = self.unet(
+            input_latents,
+            timesteps,
+            encoder_hidden_states=audio_prompts
+        ).sample
+        return model_pred
+
+logger = logging.getLogger(__name__)
+
+
 def initialize_models_and_optimizers(cfg, accelerator, weight_dtype):
     """Initialize models and optimizers"""
     model_dict = {
@@ -57,30 +107,30 @@ def initialize_models_and_optimizers(cfg, accelerator, weight_dtype):
         'scheduler_max_steps': None,
         'trainable_params': None
     }
-    
+
     model_dict['vae'] = AutoencoderKL.from_pretrained(
         cfg.pretrained_model_name_or_path,
         subfolder=cfg.vae_type,
     )
 
     unet_config_file = os.path.join(
-        cfg.pretrained_model_name_or_path, 
+        cfg.pretrained_model_name_or_path,
         cfg.unet_sub_folder + "/musetalk.json"
     )
-    
+
     with open(unet_config_file, 'r') as f:
         unet_config = json.load(f)
     model_dict['unet'] = UNet2DConditionModel(**unet_config)
-    
+
     if not cfg.random_init_unet:
         pretrained_unet_path = os.path.join(cfg.pretrained_model_name_or_path, cfg.unet_sub_folder, "pytorch_model.bin")
         print(f"### Loading existing unet weights from {pretrained_unet_path}. ###")
         checkpoint = torch.load(pretrained_unet_path, map_location=accelerator.device)
         model_dict['unet'].load_state_dict(checkpoint)
-      
+
     unet_params = [p.numel() for n, p in model_dict['unet'].named_parameters()]
     logger.info(f"unet {sum(unet_params) / 1e6}M-parameter")
-    
+
     model_dict['vae'].requires_grad_(False)
     model_dict['unet'].requires_grad_(True)
 
@@ -97,10 +147,10 @@ def initialize_models_and_optimizers(cfg, accelerator, weight_dtype):
 
     if cfg.solver.scale_lr:
         learning_rate = (
-            cfg.solver.learning_rate
-            * cfg.solver.gradient_accumulation_steps
-            * cfg.data.train_bs
-            * accelerator.num_processes
+                cfg.solver.learning_rate
+                * cfg.solver.gradient_accumulation_steps
+                * cfg.data.train_bs
+                * accelerator.num_processes
         )
     else:
         learning_rate = cfg.solver.learning_rate
@@ -140,7 +190,6 @@ def initialize_models_and_optimizers(cfg, accelerator, weight_dtype):
     )
 
     return model_dict
-
 def initialize_dataloaders(cfg):
     """Initialize training and validation dataloaders"""
     dataloader_dict = {
@@ -149,14 +198,17 @@ def initialize_dataloaders(cfg):
         'train_dataloader': None,
         'val_dataloader': None
     }
-    
-    dataloader_dict['train_dataset'] = PortraitDataset(cfg={
+
+    # --- Modification Start for Handling Custom Dataset ---
+    # Extract common dataset configuration parameters from cfg.data
+    # 将所有需要传递给 FaceDataset 或 PortraitDataset 的参数集中起来
+    dataset_config = {
         'image_size': cfg.data.image_size,
         'T': cfg.data.n_sample_frames,
         "sample_method": cfg.data.sample_method,
         'top_k_ratio': cfg.data.top_k_ratio,
         "contorl_face_min_size": cfg.data.contorl_face_min_size,
-        "dataset_key": cfg.data.dataset_key,
+        # dataset_key is handled below, not passed directly here unless using PortraitDataset
         "padding_pixel_mouth": cfg.padding_pixel_mouth,
         "whisper_path": cfg.whisper_path,
         "min_face_size": cfg.data.min_face_size,
@@ -164,40 +216,88 @@ def initialize_dataloaders(cfg):
         "cropping_jaw2edge_margin_std": cfg.cropping_jaw2edge_margin_std,
         "crop_type": cfg.crop_type,
         "random_margin_method": cfg.random_margin_method,
-    })
+    }
 
-    dataloader_dict['train_dataloader'] = torch.utils.data.DataLoader(
+    dataset_key = cfg.data.get("dataset_key", None)
+    custom_key = "Z_PERSON" # 您在 YAML 中设置的自定义标识符
+
+    if dataset_key == custom_key:
+        # --- >> Logic for Your Custom Dataset << ---
+        print(f"****** Loading custom dataset: {custom_key} ******")
+        custom_root_path = '/root/autodl-tmp/MuseTalk/data/processed/z_person/meta/'
+        # IMPORTANT: Ensure list file path is correct relative to where you run train.py
+        # Assuming train.txt is inside a 'list' subdirectory:
+        custom_list_file = '/root/autodl-tmp/MuseTalk/data/processed/z_person/list/train.txt'
+
+        # Check if paths exist before proceeding
+        if not os.path.isdir(custom_root_path):
+            raise FileNotFoundError(f"Custom dataset root path not found: {custom_root_path}")
+        if not os.path.isfile(custom_list_file):
+             raise FileNotFoundError(f"Custom dataset list file not found: {custom_list_file}")
+
+        custom_list_paths = [custom_list_file] # FaceDataset expects a list of paths
+        train_repeats = [50] # Repeat the 10s video data ~200 times for the training set epoch
+        val_repeats = [1]     # Only need 1 repeat for the validation set
+
+        print(f"  Root Path: {custom_root_path}")
+        print(f"  List Paths: {custom_list_paths}")
+        print(f"  Training Repeats: {train_repeats}")
+
+        # Directly instantiate FaceDataset, bypassing PortraitDataset factory
+        dataloader_dict['train_dataset'] = FaceDataset(
+            cfg=dataset_config,           # Pass the common config
+            list_paths=custom_list_paths, # Pass your specific list file path
+            root_path=custom_root_path,   # Pass your specific root path
+            repeats=train_repeats         # Pass the repetition factor for training
+        )
+        # Use the same data for validation, but fewer repeats
+        dataloader_dict['val_dataset'] = FaceDataset(
+            cfg=dataset_config,
+            list_paths=custom_list_paths,
+            root_path=custom_root_path,
+            repeats=val_repeats
+        )
+        print(f"Custom Train Dataset length (approx): {len(dataloader_dict['train_dataset'])}")
+        print(f"Custom Val Dataset length (approx): {len(dataloader_dict['val_dataset'])}")
+        # --- >> End Custom Dataset Logic << ---
+
+    else:
+        # --- >> Original Logic using PortraitDataset Factory << ---
+        # This branch is taken if dataset_key is "HDTF", "VFHQ", or anything else
+        print(f"****** Loading dataset using PortraitDataset factory with key: {dataset_key} ******")
+        # Add dataset_key back into the config dict specifically for PortraitDataset
+        portrait_cfg = {**dataset_config, "dataset_key": dataset_key}
+        dataloader_dict['train_dataset'] = PortraitDataset(cfg=portrait_cfg)
+        dataloader_dict['val_dataset'] = PortraitDataset(cfg=portrait_cfg)
+        # --- >> End Original Logic << ---
+
+
+    # --- DataLoader Creation (Common for both cases) ---
+    dataloader_dict['train_dataloader'] = DataLoader(
         dataloader_dict['train_dataset'],
         batch_size=cfg.data.train_bs,
-        shuffle=True,
+        shuffle=True, # Shuffling is beneficial even with repeated data
         num_workers=cfg.data.num_workers,
+        pin_memory=True, # Helps speed up data transfer to GPU
+        drop_last=True,  # Ensures all batches have the same size, useful for some distributed setups
     )
-    
-    dataloader_dict['val_dataset'] = PortraitDataset(cfg={
-        'image_size': cfg.data.image_size,
-        'T': cfg.data.n_sample_frames,
-        "sample_method": cfg.data.sample_method,
-        'top_k_ratio': cfg.data.top_k_ratio,
-        "contorl_face_min_size": cfg.data.contorl_face_min_size,
-        "dataset_key": cfg.data.dataset_key,
-        "padding_pixel_mouth": cfg.padding_pixel_mouth,
-        "whisper_path": cfg.whisper_path,
-        "min_face_size": cfg.data.min_face_size,
-        "cropping_jaw2edge_margin_mean": cfg.cropping_jaw2edge_margin_mean,
-        "cropping_jaw2edge_margin_std": cfg.cropping_jaw2edge_margin_std,
-        "crop_type": cfg.crop_type,
-        "random_margin_method": cfg.random_margin_method,
-    })
 
-    dataloader_dict['val_dataloader'] = torch.utils.data.DataLoader(
-        dataloader_dict['val_dataset'],
-        batch_size=cfg.data.train_bs,
-        shuffle=True,
-        num_workers=1,
-    )
-    
+    # Create validation dataloader only if val_dataset is valid
+    if dataloader_dict['val_dataset'] is not None and len(dataloader_dict['val_dataset']) > 0:
+        dataloader_dict['val_dataloader'] = DataLoader(
+            dataloader_dict['val_dataset'],
+            batch_size=cfg.data.train_bs, # Match train batch size for consistency in validation samples? Or set to 1? Check validation function needs.
+            shuffle=False, # No need to shuffle validation data
+            num_workers=max(1, cfg.data.num_workers // 2), # Usually fewer workers needed for validation
+            pin_memory=True,
+            drop_last=False, # Keep all validation samples
+        )
+    else:
+         print("Warning: Validation dataset is empty or None. Skipping validation dataloader creation.")
+         dataloader_dict['val_dataloader'] = None
+
+
     return dataloader_dict
-
 def initialize_loss_functions(cfg, accelerator, scheduler_max_steps):
     """Initialize loss functions and discriminators"""
     loss_dict = {

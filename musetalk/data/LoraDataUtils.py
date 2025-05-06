@@ -14,7 +14,7 @@ from transformers import AutoFeatureExtractor
 from PIL import Image
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs, coord_placeholder
 
-BATCH = 2
+BATCH = 1
 extra_margin_1_5 = 10
 
 
@@ -228,8 +228,5 @@ def GetDataLoader(project_dor, num_frames):
 
 
 if __name__ == '__main__':
-    pass
-    # feature_extractor = AutoFeatureExtractor.from_pretrained("./models/whisper")
-    # audio_feature, audio_offset = get_audio_file('./data/temp/LeiJun/wav.wav', 230, feature_extractor)
-    # print(audio_feature)
-# ProcessVideoV1_5('D:\\PythonProject\\MimicTalkForWin\\data\\LeiJun\\LeiJun.mp4')
+    ProcessVideoV1_5('./data/temp/z_25fps.mp4')
+    print("Preprocessing finished for ./data/temp/z_25fps.mp4")

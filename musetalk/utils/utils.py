@@ -203,44 +203,151 @@ def process_audio_features(cfg, batch, wav2vec, bsz, num_frames, weight_dtype):
         audio_prompts = torch.cat(audio_prompts)  # B, T, 10, 5, 384
     return audio_prompts
 
-def save_checkpoint(model, save_dir, ckpt_num, name="appearance_net", total_limit=None, logger=None):
+def save_checkpoint(model, save_dir, ckpt_num, name="unet_full", total_limit=None, logger=None):
+    """
+    Saves a full model checkpoint (state dict).
+    This is typically used when NOT training with LoRA.
+    """
+    if logger is None: logger = logging.getLogger(__name__) # Use default logger if none provided
     save_path = os.path.join(save_dir, f"{name}-{ckpt_num}.pth")
 
-    if total_limit is not None:
-        checkpoints = os.listdir(save_dir)
-        checkpoints = [d for d in checkpoints if d.endswith(".pth")]
-        checkpoints = [d for d in checkpoints if name in d]
-        checkpoints = sorted(
-            checkpoints, key=lambda x: int(x.split("-")[1].split(".")[0])
-        )
+    # --- Checkpoint Cleanup Logic (for full checkpoints) ---
+    if total_limit is not None and total_limit > 0:
+        try:
+            # Find existing full checkpoints for this model name
+            pattern = os.path.join(save_dir, f"{name}-*.pth")
+            checkpoints = glob.glob(pattern)
 
-        if len(checkpoints) >= total_limit:
-            num_to_remove = len(checkpoints) - total_limit + 1
-            removing_checkpoints = checkpoints[0:num_to_remove]
-            logger.info(
-                f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-            )
-            logger.info(
-                f"removing checkpoints: {', '.join(removing_checkpoints)}")
+            # Extract step numbers and sort
+            checkpoints_with_steps = []
+            for ckpt_path in checkpoints:
+                try:
+                    # Extract step number assuming format name-STEP.pth
+                    step = int(os.path.basename(ckpt_path).split('-')[-1].split('.')[0])
+                    checkpoints_with_steps.append((step, ckpt_path))
+                except (ValueError, IndexError):
+                    logger.warning(f"Could not parse step number from checkpoint file: {ckpt_path}")
+                    continue
 
-            for removing_checkpoint in removing_checkpoints:
-                removing_checkpoint = os.path.join(
-                    save_dir, removing_checkpoint)
-                os.remove(removing_checkpoint)
+            checkpoints_with_steps.sort(key=lambda x: x[0]) # Sort by step number (oldest first)
 
-    state_dict = model.state_dict()
-    torch.save(state_dict, save_path)
+            if len(checkpoints_with_steps) >= total_limit:
+                num_to_remove = len(checkpoints_with_steps) - total_limit + 1 # Keep total_limit-1 + new one
+                removing_checkpoints = checkpoints_with_steps[0:num_to_remove]
+                logger.info(
+                    f"{len(checkpoints_with_steps)} full '{name}' checkpoints found, keeping {total_limit}, removing {len(removing_checkpoints)}."
+                )
+                # logger.debug(f"Removing checkpoints: {[os.path.basename(p) for _, p in removing_checkpoints]}")
+
+                for step, ckpt_path in removing_checkpoints:
+                    try:
+                        os.remove(ckpt_path)
+                    except OSError as e:
+                        logger.error(f"Error removing old checkpoint {ckpt_path}: {e}")
+        except Exception as e:
+             logger.error(f"Error during full checkpoint cleanup for '{name}': {e}")
+    # --- End Cleanup ---
+
+    # Save the state dictionary
+    try:
+        state_dict = model.state_dict()
+        torch.save(state_dict, save_path)
+        logger.info(f"Full model checkpoint saved: {save_path}")
+    except Exception as e:
+        logger.error(f"Failed to save full model checkpoint to {save_path}: {e}")
+
 
 def save_models(accelerator, net, save_dir, global_step, cfg, logger=None):
-    unwarp_net = accelerator.unwrap_model(net)
-    save_checkpoint(
-        unwarp_net.unet,
-        save_dir,
-        global_step,
-        name="unet",
-        total_limit=cfg.total_limit,
-        logger=logger
-    )
+    """
+    Saves model weights. Handles LoRA vs. Full model saving based on config.
+    Assumes 'net' contains the UNet model at net.unet.
+    """
+    if logger is None: logger = logging.getLogger(__name__) # Use default logger
+    lora_enabled = cfg.get('lora', {}).get('enable_lora', False)
+
+    # --- Get the UNet model (handle potential wrapping by accelerator) ---
+    try:
+        unwrapped_net = accelerator.unwrap_model(net)
+        unet_model = unwrapped_net.unet # Access the UNet within the Net wrapper
+    except Exception as e:
+        logger.error(f"Could not unwrap model or access unet: {e}. Skipping model save.")
+        return
+
+    if lora_enabled:
+        # --- Save LoRA Weights ---
+        logger.debug(f"Attempting to save LoRA weights for step {global_step}")
+        if not hasattr(unet_model, 'save_attn_procs'):
+            logger.warning("UNet model does not have 'save_attn_procs' method. Cannot save LoRA weights.")
+            return
+
+        unet_lora_save_path = os.path.join(save_dir, "unet_lora_weights")
+        os.makedirs(unet_lora_save_path, exist_ok=True)
+
+        # Recommended format: safetensors
+        use_safetensors = cfg.get("save_safetensors", True)
+        file_extension = ".safetensors" if use_safetensors else ".bin"
+        lora_filename = f"lora_unet_{global_step}{file_extension}"
+        full_lora_path = os.path.join(unet_lora_save_path, lora_filename)
+
+        try:
+            # save_attn_procs saves only the LoRA layers
+            unet_model.save_attn_procs(
+                unet_lora_save_path,
+                weight_name=lora_filename, # Specify the exact filename
+                safe_serialization=use_safetensors
+            )
+            logger.info(f"Saved LoRA weights to {full_lora_path}")
+        except Exception as e:
+             logger.error(f"Error saving LoRA weights for step {global_step}: {e}")
+             return # Don't cleanup if save failed
+
+        # --- LoRA Checkpoint Cleanup ---
+        if cfg.total_limit is not None and cfg.total_limit > 0:
+            try:
+                pattern = os.path.join(unet_lora_save_path, f"lora_unet_*{file_extension}")
+                checkpoints = glob.glob(pattern)
+                checkpoints_with_steps = []
+                for ckpt_path in checkpoints:
+                    try:
+                        step = int(os.path.basename(ckpt_path).split('_')[-1].split('.')[0])
+                        checkpoints_with_steps.append((step, ckpt_path))
+                    except (ValueError, IndexError):
+                        logger.warning(f"Could not parse step number from LoRA file: {ckpt_path}")
+                        continue
+
+                checkpoints_with_steps.sort(key=lambda x: x[0])
+
+                if len(checkpoints_with_steps) > cfg.total_limit:
+                    num_to_remove = len(checkpoints_with_steps) - cfg.total_limit
+                    removing_checkpoints = checkpoints_with_steps[0:num_to_remove]
+                    logger.info(
+                        f"{len(checkpoints_with_steps)} LoRA checkpoints found, keeping {cfg.total_limit}, removing {len(removing_checkpoints)}."
+                    )
+                    for step, ckpt_path in removing_checkpoints:
+                         try:
+                              os.remove(ckpt_path)
+                         except OSError as e:
+                              logger.error(f"Error removing old LoRA checkpoint {ckpt_path}: {e}")
+            except Exception as e:
+                logger.error(f"Error during LoRA checkpoint cleanup: {e}")
+        # --- End LoRA Cleanup ---
+
+    else:
+        # --- Save Full U-Net Weights (using save_checkpoint) ---
+        logger.debug(f"Attempting to save full UNet weights for step {global_step}")
+        # Optional: Save full weights in a specific subdirectory
+        unet_full_save_path = os.path.join(save_dir, "unet_full_weights")
+        os.makedirs(unet_full_save_path, exist_ok=True)
+
+        save_checkpoint(
+            model=unet_model, # Pass the unwrapped UNet model
+            save_dir=unet_full_save_path, # Save to the dedicated subdirectory
+            ckpt_num=global_step,
+            name="unet", # Keep the base name for the file (e.g., unet-1000.pth)
+            total_limit=cfg.total_limit,
+            logger=logger
+        )
+
 
 def delete_additional_ckpt(base_path, num_keep):
     dirs = []

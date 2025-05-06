@@ -1,3 +1,8 @@
+import os, sys
+# 把项目根目录（上一级）加到 sys.path
+sys.path.append(os.path.abspath(os.path.join(__file__, '..', '..')))
+
+from musetalk.utils.face_detection import FaceAlignment, LandmarksType
 import os
 import argparse
 import subprocess

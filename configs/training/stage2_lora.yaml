@@ -1,0 +1,115 @@
+# configs/training/stage2_lora.yaml
+# Corrected configuration for LoRA fine-tuning based on stage2.yaml
+
+# --- General Settings ---
+exp_name: 'musetalk_lora_person_x'  # MODIFY: Name for your LoRA experiment (e.g., person's name)
+output_dir: './outputs/lora_finetune/person_x/' # MODIFY: Directory to save LoRA experiment outputs
+pretrained_model_name_or_path: "./models"  # Path to the BASE MuseTalk models (should contain unet/, sd-vae/)
+unet_sub_folder: musetalk  # CORRECTED: Subfolder containing the BASE unet weights (musetalk.json, pytorch_model.bin/model.safetensors) - Match original stage2
+random_init_unet: False    # IMPORTANT: Must be false to load base weights for LoRA
+whisper_path: "./models/whisper"  # Path to the Whisper model
+resume_from_checkpoint: False  # Set to True only if resuming a PREVIOUS LoRA training run
+padding_pixel_mouth: 10
+vae_type: "sd-vae"          # Type of VAE model to use
+
+# --- LoRA Specific Settings ---
+lora:
+  enable_lora: true       # Enable LoRA training
+  rank: 16                # Rank of the LoRA matrices (e.g., 4, 8, 16, 32) - Adjust if needed
+  alpha: 16               # Scaling factor (often same as rank) - Adjust if needed
+  # Optional: Specify target modules if needed. PEFT/Diffusers might auto-target common layers if omitted.
+  # Check UNet structure if specific layers are desired. Examples:
+  # target_modules: ["to_q", "to_k", "to_v", "to_out.0"] # Attention blocks
+  # target_modules: ["to_q", "to_k", "to_v", "to_out.0", "conv1", "conv2"] # Attention + some convs
+  dropout: 0.0            # Dropout probability for LoRA layers (0 means no dropout)
+  # lora_lr: 1e-4          # REMOVED: Set the main solver.learning_rate instead for PEFT integration
+
+# --- Validation parameters ---
+num_images_to_keep: 8
+ref_dropout_rate: 0         # Keep 0 unless overfitting is observed
+syncnet_config_path: "./configs/training/syncnet.yaml" # Ensure this path is correct
+use_adapted_weight: False   # Consider setting to True if sync quality is poor in your data
+cropping_jaw2edge_margin_mean: 10
+cropping_jaw2edge_margin_std: 10
+crop_type: "dynamic_margin_crop_resize"
+random_margin_method: "normal"
+num_backward_frames: 16     # Keep 16 if using sync_loss, matches n_sample_frames
+
+# --- Data Settings ---
+data:
+  # VERY IMPORTANT: Modify dataset_key OR adjust list_paths within the dataset class
+  # to point to your specific person's dataset.
+  dataset_key: "Z_PERSON" # MODIFY THIS to your specific dataset key, or comment out if using list_paths directly
+  train_bs: 2             # Training batch size (can potentially increase slightly for LoRA vs full training, e.g., 4, depending on GPU VRAM)
+  image_size: 256
+  n_sample_frames: 16     # Should match num_backward_frames if using sync_loss
+  num_workers: 8
+  audio_padding_length_left: 2
+  audio_padding_length_right: 2
+  sample_method: pose_similarity_and_mouth_dissimilarity
+  top_k_ratio: 0.51
+  contorl_face_min_size: True  # Consider setting to False if your target person video has small faces
+  min_face_size: 200           # Adjust if needed based on your data
+
+# --- Loss Parameters ---
+# Adjust weights based on fine-tuning goals.
+loss_params:
+  l1_loss: 1.0
+  vgg_loss: 0.01            # Keep low or disable (0) if perceptual quality isn't the main focus initially
+  vgg_layer_weight: [1, 1, 1, 1, 1]
+  pyramid_scale: [1, 0.5, 0.25, 0.125] # Keep same as original
+  gan_loss: 0.0             # RECOMMENDED: Set GAN losses to 0 initially for faster LoRA tuning focused on identity/sync
+  fm_loss: [1.0, 1.0, 1.0, 1.0] # Only relevant if gan_loss > 0
+  sync_loss: 0.05           # Keep or potentially increase slightly (e.g., 0.1) if lip-sync is the main goal
+  mouth_gan_loss: 0.0       # RECOMMENDED: Set GAN losses to 0 initially
+
+# --- Discriminator Settings (Largely Ignored if gan_loss is 0) ---
+model_params:
+  discriminator_params:
+    scales: [1]
+    block_expansion: 32
+    max_features: 512
+    num_blocks: 4
+    sn: True
+    image_channel: 3
+    estimate_jacobian: False
+
+discriminator_train_params:
+  lr: 0.000005 # Irrelevant if gan_loss is 0
+  eps: 0.00000001
+  weight_decay: 0.01
+  patch_size: 1
+  betas: [0.5, 0.999]
+  epochs: 10000 # Irrelevant
+  start_gan: 1000 # Irrelevant if gan_loss is 0
+
+# --- Solver Settings ---
+solver:
+  gradient_accumulation_steps: 8 # Adjust based on GPU memory (if train_bs increased, might need to decrease this)
+  uncond_steps: 10 # Keep from original
+  mixed_precision: 'fp16'    # RECOMMENDED: Use 'fp16' or 'bf16' for faster LoRA training & less memory
+  enable_xformers_memory_efficient_attention: True # Keep True if xformers is installed
+  gradient_checkpointing: False # RECOMMENDED: Set to False for LoRA, usually faster
+  max_train_steps: 10000     # MODIFY: Significantly reduce training steps for fine-tuning (e.g., 5k, 10k, 20k). Start low (5k-10k) and increase if needed.
+  max_grad_norm: 1.0
+  # --- Learning Rate ---
+  # IMPORTANT: Set this to your desired LoRA learning rate.
+  # The optimizer will apply this only to the LoRA parameters.
+  learning_rate: 1.0e-4      # MODIFY: Typical LoRA learning rate (e.g., 1e-4, 5e-5). Higher than full fine-tuning LR.
+  scale_lr: False            # Keep False unless you have a specific reason for scaling
+  lr_warmup_steps: 200       # MODIFY: Reduce warmup steps (e.g., 100-500). ~5-10% of max_train_steps is common.
+  lr_scheduler: "linear"     # Or "cosine", "constant_with_warmup" etc. Linear or Cosine are good defaults.
+  # --- Optimizer ---
+  use_8bit_adam: False       # Try True if memory is tight (requires bitsandbytes)
+  adam_beta1: 0.9            # CORRECTED: Common default is 0.9, original had 0.5 (often used with GANs)
+  adam_beta2: 0.999
+  adam_weight_decay: 1.0e-2
+  adam_epsilon: 1.0e-8
+
+# --- Saving & Validation ---
+total_limit: 5              # MODIFY: Keep fewer LoRA checkpoints (e.g., 3-5)
+save_model_epoch_interval: 250000 # This likely won't be reached if max_train_steps is low
+checkpointing_steps: 1000   # MODIFY: Checkpoint frequency (e.g., every 500 or 1000 steps)
+val_freq: 1000              # MODIFY: Validation frequency (e.g., every 500 or 1000 steps)
+
+seed: 42                    # Use a different seed if desired (original was 41)
